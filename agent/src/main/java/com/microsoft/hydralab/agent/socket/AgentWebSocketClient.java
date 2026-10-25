@@ -82,10 +82,10 @@ public class AgentWebSocketClient extends WebSocketClient {
                 log.error("onClose, code: {}, reason: {}, remote: {}, reconnectTime: {}, {}", code, reason, remote, reconnectTime, violatedReconnectTime);
                 System.exit(code);
             } else {
-                // wait for 10 seconds and then retry
+                // wait for 30 seconds and then retry
                 try {
-                    log.info("onClose, code: {}, reason: {}, remote: {}, reconnectTime: {}, {} sleep 10 seconds", code, reason, remote, reconnectTime, violatedReconnectTime);
-                    Thread.sleep(10000);
+                    log.info("onClose, code: {}, reason: {}, remote: {}, reconnectTime: {}, {} sleep 30 seconds", code, reason, remote, reconnectTime, violatedReconnectTime);
+                    Thread.sleep(30000);
                 } catch (InterruptedException e) {
                     log.error("onClose, sleep error", e);
                 }
