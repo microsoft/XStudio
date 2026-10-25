@@ -19,6 +19,9 @@ variables:
 - name: securityScan
   value: $[or(eq(variables['Build.Reason'], 'Manual'), eq(variables['Build.Reason'], 'Schedule'))]
 
+pool:
+  name: MobileExperience_Tiny_Workloads_WestUS2
+
 stages:
 - stage: Build
   displayName: Build and push stage
