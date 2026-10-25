@@ -44,8 +44,6 @@ public class FFmpegConcatUtil {
                 // The interrupted status of the thread is cleared by this method.
                 Assert.isTrue(Thread.interrupted());
             }
-
-
             process.waitFor();
             return new File(outputDir, fileName);
         } catch (IOException | InterruptedException e) {
@@ -58,7 +56,8 @@ public class FFmpegConcatUtil {
         return null;
     }
 
-    public static void mergeVideosSideBySide(String leftVideoPath, String rightVideoPath, String mergeDestinationPath, Logger logger) {
+    public static void mergeVideosSideBySide(
+            String leftVideoPath, String rightVideoPath, String mergeDestinationPath, Logger logger) {
         try {
             ProcessBuilder builder = new ProcessBuilder("ffmpeg", "-i", rightVideoPath,
                     "-i", leftVideoPath, "-filter_complex",
