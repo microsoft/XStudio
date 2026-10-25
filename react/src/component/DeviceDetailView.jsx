@@ -90,14 +90,28 @@ export default class DeviceDetailView extends React.Component {
                                 item.deviceGroup ?
                                 <span className='badge' style={{ fontSize: '0.8rem' }}>{item.deviceGroup.join(' ')}</span> : null
                             }
+                            {/* ===== CHANGE FOR ISSUE #345 ===== */}
+                            {
+                                item.isPrivate ?
+                                <span className='badge badge-secondary' style={{ fontSize: '0.8rem' }}>Private</span> : null
+                            }
+                            {/* ================================= */}
                         </Stack>
                     }>
+                        {/* ===== CHANGE FOR ISSUE #345 ===== */}
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                            <span className={"badge " + badgeClass} style={{ fontSize: "1rem" }}>
-                                {this.getDeviceName(item)}
-                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                <span className={"badge " + badgeClass} style={{ fontSize: "1rem" }}>
+                                    {this.getDeviceName(item)}
+                                </span>
+                                {item.isPrivate ?
+                                    <span className="material-icons-outlined" style={{ fontSize: '1rem', color: '#ffd54f' }}>lock</span>
+                                    : null
+                                }
+                            </div>
                             <span className="badge" style={{ fontSize: "0.6rem" }}>{item.serialNum}</span>
                         </div>
+                        {/* ================================= */}
                     </Tooltip>
                 </div>
             </div>

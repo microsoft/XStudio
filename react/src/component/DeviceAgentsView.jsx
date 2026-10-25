@@ -127,8 +127,14 @@ export default class DeviceAgentsView extends BaseView {
                                 style={{ backgroundColor: folderHeadBgColor }}
                                 onClick={() => this.changeCollapseStatus(agent.agentId)}>
 
-                                <div style={{ color: 'white', fontSize: 'large', fontWeight: 'bold' }}>
+                                <div style={{ color: 'white', fontSize: 'large', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                     {agent.agentName}: {agent.devices.length}
+                                    {agent.teamId ?
+                                        <MUITooltip title={"Private — Team: " + agent.teamName}>
+                                            <span className="material-icons-outlined" style={{ fontSize: '1.1rem', color: '#ffd54f' }}>lock</span>
+                                        </MUITooltip>
+                                        : null
+                                    }
                                 </div>
 
                                 <div class='deviceAgents-agentBanner-tail'>
@@ -574,8 +580,49 @@ export default class DeviceAgentsView extends BaseView {
     }
 
     componentDidMount() {
-        this.getLatestAgentVersion()
-        this.updateDeviceListData()
+        // MOCK DATA for visual testing - remove before PR
+        this.setState({
+            latestAgentVersion: '999',
+            agents: [
+                {
+                    agentId: 'agent-private-1',
+                    agentName: 'Private Agent (Team A)',
+                    agentOS: 'Linux',
+                    agentVersionCode: '999',
+                    agentVersionName: '1.0.0',
+                    agentStatus: 'HEALTHY',
+                    teamId: 'team-001',
+                    teamName: 'Team Alpha',
+                    userName: 'user@example.com',
+                    hostname: 'host-private',
+                    ip: '192.168.1.1',
+                    functionAvailabilities: [],
+                    devices: [
+                        { id: 'd1', serialNum: 'PRIV001', name: 'Pixel 6', model: 'Pixel 6', status: 'ONLINE', brand: 'Google', type: 'ANDROID', isPrivate: true, osSDKInt: '31', screenSize: '1080x2400', screenDensity: 420, deviceGroup: ['groupA'] },
+                        { id: 'd2', serialNum: 'PUB002', name: 'Galaxy S21', model: 'Galaxy S21', status: 'ONLINE', brand: 'Samsung', type: 'ANDROID', isPrivate: false, osSDKInt: '30', screenSize: '1080x2400', screenDensity: 400, deviceGroup: [] },
+                    ]
+                },
+                {
+                    agentId: 'agent-public-2',
+                    agentName: 'Public Agent (No Team)',
+                    agentOS: 'Windows',
+                    agentVersionCode: '999',
+                    agentVersionName: '1.0.0',
+                    agentStatus: 'HEALTHY',
+                    teamId: null,
+                    teamName: null,
+                    userName: 'admin@example.com',
+                    hostname: 'host-public',
+                    ip: '192.168.1.2',
+                    functionAvailabilities: [],
+                    devices: [
+                        { id: 'd3', serialNum: 'PUB003', name: 'Pixel 5', model: 'Pixel 5', status: 'TESTING', brand: 'Google', type: 'ANDROID', isPrivate: false, osSDKInt: '30', screenSize: '1080x2340', screenDensity: 432, deviceGroup: [] },
+                    ]
+                }
+            ],
+            collapseStatus: { 'agent-private-1': true, 'agent-public-2': true },
+            refreshing: false,
+        })
     }
 
     handleCloseDeviceDialog() {
