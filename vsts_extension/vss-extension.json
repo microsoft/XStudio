@@ -1,6 +1,6 @@
 {
     "manifestVersion": 1,
-    "id": "hydra-lab",
+    "id": "hydra-lab-alter",
     "name": "Hydra Lab",
     "version": "2.0.13",
     "publisher": "",
@@ -10,7 +10,7 @@
             "id": "Microsoft.VisualStudio.Services"
         }
     ],    
-    "description": "Hydra Lab Azure Devops Extension - Allow you to automate deploy tests to Hydra Lab platform from your CI/CD environment.",
+    "description": "Hydra Lab Azure Devops Extension - Allow you to automatically deploy tests to Hydra Lab platform from your CI/CD environment.",
     "categories": [
         "Azure Pipelines"
     ],
@@ -54,7 +54,7 @@
                 "ms.vss-endpoint.endpoint-types"
             ],
             "properties": {
-                "name": "hydra-lab",
+                "name": "hydra-lab-alter",
                 "displayName": "Hydra Lab",
                 "url": "https://example.com",
                 "inputDescriptors": [],

@@ -1,5 +1,5 @@
 {
-    "id": "faa2220b-3a71-4022-873e-d5b7b188eb53",
+    "id": "9942F8CF-A440-EA84-C607-732E5DB242C9",
     "name": "HydraLabDeployTest",
     "friendlyName": "Deploy Test to HydraLab",
     "description": "Deploy Test to HydraLab",    
@@ -24,7 +24,7 @@
             "aliases": [
                 "serviceConnection"
             ],
-            "type": "connectedService:hydra-lab",
+            "type": "connectedService:hydra-lab-alter",
             "label": "Service connection",
             "defaultValue": "",
             "required": true,

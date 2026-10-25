@@ -55,6 +55,10 @@ node_modules
 # VS extenstions
 *.vsix
 
+# generated js files for ADO extension
+/vsts_extension/Tasks/HydraLabDeployTest/hydra-lab-deploy-test.js
+/vsts_extension/Tasks/HydraLabDeployTest/hydra-lab-deploy-test.js.map
+
 # Credential and local env specified files
 local.properties
 application-local.yml

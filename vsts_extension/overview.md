@@ -1,6 +1,6 @@
 # Introduction
 
-This extension contains a set of deployment tasks which allow you to automate deploy tests to Hydra Lab from your CI environment. This can reduce the effort needed to test your app, since you can simply push changes to the configured source control branches, and let your automated build take care of the rest.
+This extension contains a set of deployment tasks which allow you to automatically deploy tests to Hydra Lab from your CI environment. This can streamline the testing process, since you only need to push changes to the specified source control branches, and let your automated build handle the rest.
 
 # Introduction of Hydra Lab Platform
 
