@@ -76,9 +76,10 @@ public class AgentWebSocketClient extends WebSocketClient {
         }
 
         // if the connection is closed by server with 1008, wait and retry
+        // Allow up to 10 reconnect attempts before exiting
         if (code == CloseReason.CloseCodes.VIOLATED_POLICY.getCode()) {
             violatedReconnectTime++;
-            if(violatedReconnectTime > 5) {
+            if(violatedReconnectTime > 10) {
                 log.error("onClose, code: {}, reason: {}, remote: {}, reconnectTime: {}, {}", code, reason, remote, reconnectTime, violatedReconnectTime);
                 System.exit(code);
             } else {
