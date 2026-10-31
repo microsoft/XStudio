@@ -44,7 +44,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Script:InstallerVersion = "1.13.3"
+$Script:InstallerVersion = "1.13.6"
+$Script:RuntimeMutationStarted = $false
 
 if ($Help) {
   @"
@@ -230,7 +231,7 @@ function ConvertTo-Hashtable($Value) {
   if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
     $items = @()
     foreach ($item in $Value) { $items += (ConvertTo-Hashtable $item) }
-    return $items
+    return ,$items
   }
   if ($Value.GetType().Name -eq "PSCustomObject") {
     $table = [ordered]@{}
@@ -278,22 +279,28 @@ function Remove-JsonComments([string]$Text) {
     [void]$sb.Append($ch)
     $i++
   }
-  # Remove trailing commas before a closing } or ] (JSONC allows them).
-  return ([regex]::Replace($sb.ToString(), ',(\s*[}\]])', '$1'))
+  # Match string tokens first so JSONC cleanup cannot change option values.
+  return ([regex]::Replace($sb.ToString(), '"(?:\\.|[^"\\])*"|,(?=\s*[}\]])', {
+    param($match)
+    if ($match.Value -eq ',') { return '' }
+    return $match.Value
+  }))
 }
 
 function Read-JsonObject([string]$Path, [hashtable]$DefaultValue) {
   if (-not (Test-Path -LiteralPath $Path)) { return $DefaultValue }
   $raw = Get-Content -Raw -LiteralPath $Path
-  if ([string]::IsNullOrWhiteSpace($raw)) { return $DefaultValue }
+  if ([string]::IsNullOrWhiteSpace($raw)) {
+    throw "Existing config is empty, not an absent registration: $Path"
+  }
   try {
-    return ConvertTo-Hashtable ($raw | ConvertFrom-Json)
+    $parsed = ConvertTo-Hashtable ($raw | ConvertFrom-Json)
   }
   catch {
     # Retry once after stripping JSONC comments / trailing commas, which is the
     # common reason a hand- or VS Code-authored config fails strict parsing.
     try {
-      return ConvertTo-Hashtable ((Remove-JsonComments $raw) | ConvertFrom-Json)
+      $parsed = ConvertTo-Hashtable ((Remove-JsonComments $raw) | ConvertFrom-Json)
     }
     catch {
       throw "The existing config file is not valid JSON and could not be parsed: $Path`n" +
@@ -301,6 +308,10 @@ function Read-JsonObject([string]$Path, [hashtable]$DefaultValue) {
             "  Fix or delete that file (e.g. reset it to '{}') and re-run the installer."
     }
   }
+  if ($parsed -isnot [System.Collections.IDictionary]) {
+    throw "Existing config must contain a JSON object: $Path"
+  }
+  return $parsed
 }
 
 function Write-JsonObject([string]$Path, $Value) {
@@ -709,6 +720,7 @@ function Resolve-ManagedVenvPython {
 
 function New-ManagedVenv($PythonInfo) {
   if ($Force -and (Test-Path -LiteralPath $VenvPath)) {
+    Start-XTesterRuntimeMutation
     Invoke-Step "Removing existing managed venv: $VenvPath" {
       Remove-Item -LiteralPath $VenvPath -Recurse -Force
     }
@@ -721,6 +733,7 @@ function New-ManagedVenv($PythonInfo) {
   # every future run fail with "Managed venv is missing python.exe". Detect an
   # incomplete venv up front and rebuild it instead of failing.
   if ((Test-Path -LiteralPath $VenvPath) -and -not (Resolve-ManagedVenvPython)) {
+    Start-XTesterRuntimeMutation
     Warn "Existing managed venv at $VenvPath is incomplete (no usable python.exe); recreating it."
     Invoke-Step "Removing incomplete managed venv: $VenvPath" {
       Remove-Item -LiteralPath $VenvPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -728,6 +741,7 @@ function New-ManagedVenv($PythonInfo) {
   }
 
   if (-not (Test-Path -LiteralPath $VenvPath)) {
+    Start-XTesterRuntimeMutation
     Invoke-Step "Creating managed X-Tester venv: $VenvPath" {
       $venvArgs = @()
       if ($PythonInfo.Arguments) { $venvArgs += $PythonInfo.Arguments }
@@ -825,6 +839,7 @@ function Ensure-XTesterLaunchers([string]$VenvPython, [string]$WheelPath = "") {
   if ([string]::IsNullOrWhiteSpace($repairVersion)) { return }
 
   Warn "Repairing missing XTester launchers at installed version $repairVersion without changing dependencies."
+  Start-XTesterRuntimeMutation
   $repairArgs = @(
     "-m", "pip", "install", "--progress-bar", "off", "--force-reinstall", "--no-deps",
     "xtester==$repairVersion"
@@ -844,8 +859,59 @@ function Ensure-XTesterLaunchers([string]$VenvPython, [string]$WheelPath = "") {
   }
 }
 
+function Start-XTesterRuntimeMutation {
+  if (-not $script:RuntimeMutationStarted) {
+    Stop-XTesterMcpProcesses
+    $script:RuntimeMutationStarted = $true
+  }
+}
+
+function Get-XTesterInstalledVersion([string]$VenvPython) {
+  $probe = @'
+from importlib.metadata import PackageNotFoundError, version
+try:
+    print(version('xtester'))
+except PackageNotFoundError:
+    pass
+'@
+  $installed = & $VenvPython -I -c $probe
+  if ($LASTEXITCODE -ne 0) { throw "Could not read managed XTester version metadata." }
+  return $installed
+}
+
 function Install-XTesterIntoVenv([string]$VenvPython) {
   Invoke-WithCleanPythonPath {
+    $targetVersion = $Version
+    if ($Source -ne "local" -and [string]::IsNullOrWhiteSpace($targetVersion)) {
+      Info "Resolving latest X-Tester version from private feed"
+      $targetVersion = Get-LatestXTesterVersionFromFeed $VenvPython
+      if ([string]::IsNullOrWhiteSpace($targetVersion)) {
+        Warn "Could not resolve latest version from feed; falling back to plain 'latest' install. Installed version is not confirmed current."
+      } else {
+        Success "Latest X-Tester on feed: $targetVersion"
+      }
+    }
+    if ($Source -ne "local" -and -not $Force -and $targetVersion) {
+      $installedVersion = Get-XTesterInstalledVersion $VenvPython
+      if ($installedVersion -eq $targetVersion) {
+        Ensure-XTesterLaunchers $VenvPython
+        if (-not (Test-XTesterRemoteDependencies $VenvPython)) {
+          Warn "Repairing missing Remote dependencies at installed XTester version $installedVersion."
+          Start-XTesterRuntimeMutation
+          Invoke-External $VenvPython @(
+            "-m", "pip", "install", "--progress-bar", "off",
+            "--index-url", $FeedUrl, "--extra-index-url", $ExtraIndexUrl,
+            "xtester[remote]==$installedVersion"
+          )
+          if (-not (Test-XTesterRemoteDependencies $VenvPython)) {
+            throw "Remote dependencies are still unavailable after one repair attempt. Client registration stopped."
+          }
+        }
+        Success "Managed XTester $installedVersion is current; skipped package and bulk dependency upgrades."
+        return
+      }
+    }
+    Start-XTesterRuntimeMutation
     Invoke-Step "Upgrading pip and installing private-feed auth helpers" {
       Invoke-External $VenvPython @("-m", "pip", "install", "--progress-bar", "off", "-U", "pip")
       Invoke-External $VenvPython @("-m", "pip", "install", "--progress-bar", "off", "-U", "--prefer-binary", "keyring", "artifacts-keyring")
@@ -876,21 +942,6 @@ function Install-XTesterIntoVenv([string]$VenvPython) {
       }
       Ensure-XTesterLaunchers $VenvPython $wheel.FullName
       return
-    }
-
-    # Resolve the concrete version to install. Explicit -Version always wins;
-    # otherwise discover the latest from the feed and pin to it. Pinning to a
-    # discovered version avoids the failure mode where pip reports an older
-    # release as "already satisfied" because its known index is stale.
-    $targetVersion = $Version
-    if ([string]::IsNullOrWhiteSpace($targetVersion)) {
-      Info "Resolving latest X-Tester version from private feed"
-      $targetVersion = Get-LatestXTesterVersionFromFeed $VenvPython
-      if ([string]::IsNullOrWhiteSpace($targetVersion)) {
-        Warn "Could not resolve latest version from feed; falling back to plain 'latest' install."
-      } else {
-        Success "Latest X-Tester on feed: $targetVersion"
-      }
     }
 
     if ([string]::IsNullOrWhiteSpace($targetVersion)) {
@@ -961,7 +1012,7 @@ function Resolve-XTesterMcpFromVenv {
   return (Resolve-Path -LiteralPath $exe).Path
 }
 
-function Test-XTesterMcpProtocol([string]$VenvPython, [string]$CommandPath) {
+function Test-XTesterRemoteDependencies([string]$VenvPython) {
   # Older package Doctors only check MCP; validate Remote without logging in or starting a host.
   $remoteProbe = @'
 import importlib
@@ -971,7 +1022,14 @@ for name in ('msal', 'msal_extensions', 'websockets', 'adbutils', 'uiautomator2'
 if sys.platform == 'win32':
     importlib.import_module('pymsalruntime')
 '@
-  Invoke-External $VenvPython @("-I", "-c", $remoteProbe)
+  & $VenvPython -I -c $remoteProbe | Out-Host
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Test-XTesterMcpProtocol([string]$VenvPython, [string]$CommandPath) {
+  if (-not (Test-XTesterRemoteDependencies $VenvPython)) {
+    throw "Remote dependencies are unavailable. Client registration stopped."
+  }
   # Ignore checkout modules and PYTHONPATH when loading the installed Doctor.
   Invoke-External $VenvPython @("-I", "-m", "xtester.mcp.doctor", "--command", $CommandPath, "--timeout-seconds", "10")
 }
@@ -1019,57 +1077,62 @@ function Ensure-CopilotCli {
 }
 
 function Register-Copilot([string]$CommandPath) {
-  $copilot = Ensure-CopilotCli
-  try {
-    Invoke-Step "Registering X-Tester MCP with GitHub Copilot CLI" {
-      # If the server is already registered, remove it first so 'mcp add' does
-      # not fail with 'Server "<name>" already exists'.
-      $existing = & $copilot mcp list 2>&1
-      if ($LASTEXITCODE -eq 0 -and ($existing | Out-String) -match ("(?m)^\s*" + [regex]::Escape($ServerName) + "(\s|$|:)")) {
-        Info "Updating existing '$ServerName' entry in Copilot CLI"
-        & $copilot mcp remove $ServerName 2>&1 | ForEach-Object { Write-Host "    $_" }
-      }
-      Invoke-External $copilot @("mcp", "add", $ServerName, "--", $CommandPath)
-    }
-  }
-  catch {
-    Warn "copilot mcp add failed: $($_.Exception.Message)"
-    Warn "Writing ~/.copilot/mcp-config.json directly."
-    $configPath = Join-Path (Join-Path $HOME ".copilot") "mcp-config.json"
-    $config = Read-JsonObject $configPath ([ordered]@{ mcpServers = [ordered]@{} })
-    if (-not $config.Contains("mcpServers")) { $config["mcpServers"] = [ordered]@{} }
-    $config["mcpServers"][$ServerName] = [ordered]@{
-      type = "local"
-      command = $CommandPath
-      args = @()
-      tools = @("*")
-    }
-    Write-JsonObject $configPath $config
-    Success "Wrote $configPath"
-  }
+  $configPath = Join-Path (Join-Path $HOME ".copilot") "mcp-config.json"
+  $state = Get-XTesterClientState $configPath "mcpServers" $CommandPath "local"
+  if ($state.State -eq "absent") { $null = Ensure-CopilotCli }
+  Set-XTesterClientRegistration $state $configPath "mcpServers" $CommandPath "local"
 }
 
 function Register-ClaudeDesktop([string]$CommandPath) {
   $configPath = Join-Path $env:APPDATA "Claude\claude_desktop_config.json"
-  $config = Read-JsonObject $configPath ([ordered]@{ mcpServers = [ordered]@{} })
-  if (-not $config.Contains("mcpServers")) { $config["mcpServers"] = [ordered]@{} }
-  $config["mcpServers"][$ServerName] = [ordered]@{
-    command = $CommandPath
-    args = @()
-  }
-  Write-JsonObject $configPath $config
-  Success "Wrote Claude Desktop config: $configPath"
-  Warn "Restart Claude Desktop to load the X-Tester MCP server."
+  $state = Get-XTesterClientState $configPath "mcpServers" $CommandPath ""
+  Set-XTesterClientRegistration $state $configPath "mcpServers" $CommandPath ""
 }
 
 function Register-ClaudeCode([string]$CommandPath) {
+  $configPath = Join-Path $HOME ".claude.json"
+  $config = Read-JsonObject $configPath ([ordered]@{})
+  # Claude Code's local/project scopes override the user registration. Do not
+  # claim readiness for a user entry hidden by a different effective command.
+  $projectPath = Join-Path (Get-Location).Path ".mcp.json"
+  $project = Read-JsonObject $projectPath ([ordered]@{})
+  $scopes = @($project)
+  if ($config.Contains("projects")) {
+    if ($config["projects"] -isnot [System.Collections.IDictionary]) {
+      throw "Claude Code projects must be a JSON object: $configPath"
+    }
+    foreach ($path in $config["projects"].Keys) {
+      if (Test-XTesterCommandPath $path (Get-Location).Path) {
+        $local = $config["projects"][$path]
+        if ($local -isnot [System.Collections.IDictionary]) {
+          throw "Claude Code local project config must be a JSON object: $configPath"
+        }
+        $scopes = @($local) + $scopes
+      }
+    }
+  }
+  foreach ($scope in $scopes) {
+    $scopedState = Get-XTesterClientState $configPath "mcpServers" $CommandPath "" $scope
+    if ($scopedState.State -eq "stale") {
+      throw "Claude Code has a stale project/local registration. Reconcile that scope before adding a user registration."
+    }
+    if ($scopedState.State -eq "current") {
+      Success "Claude Code project/local registration is current."
+      return
+    }
+  }
+  $state = Get-XTesterClientState $configPath "mcpServers" $CommandPath "" $config
+  if ($state.State -ne "absent") {
+    Set-XTesterClientRegistration $state $configPath "mcpServers" $CommandPath ""
+    return
+  }
   $claude = Get-Command "claude" -ErrorAction SilentlyContinue
   if (-not $claude) {
     throw "claude CLI was not found; install Claude Code or select another client."
   }
 
   Invoke-Step "Registering X-Tester MCP with Claude Code" {
-    Invoke-External $claude.Source @("mcp", "add", $ServerName, $CommandPath)
+    Invoke-External $claude.Source @("mcp", "add", "--scope", "user", $ServerName, $CommandPath)
   }
 }
 
@@ -1089,47 +1152,75 @@ function Get-VSCodeUserMcpConfigPath {
   return Join-Path $base "Code/User/mcp.json"
 }
 
-function New-XTesterMcpServerEntry([string]$CommandPath) {
-  return [ordered]@{
-    type = "stdio"
-    command = $CommandPath
-    args = @()
-    env = [ordered]@{}
+function Test-XTesterCommandPath([string]$Actual, [string]$Expected) {
+  if (-not [System.IO.Path]::IsPathRooted($Actual)) { return $false }
+  return ([System.IO.Path]::GetFullPath($Actual) -ieq [System.IO.Path]::GetFullPath($Expected))
+}
+
+function Get-XTesterClientState(
+    [string]$ConfigPath, [string]$Section, [string]$CommandPath, [string]$Type,
+    [System.Collections.IDictionary]$Config = $null) {
+  if ($null -eq $Config) { $Config = Read-JsonObject $ConfigPath ([ordered]@{}) }
+  if (-not $config.Contains($Section)) {
+    return @{ State = "absent"; Config = $config }
   }
+  $servers = $config[$Section]
+  if ($servers -isnot [System.Collections.IDictionary]) {
+    throw "Existing '$Section' must be a JSON object: $ConfigPath. No configuration was changed."
+  }
+  if (-not $servers.Contains($ServerName)) {
+    return @{ State = "absent"; Config = $config }
+  }
+  $entry = $servers[$ServerName]
+  if ($entry -isnot [System.Collections.IDictionary] -or
+      $entry["command"] -isnot [string] -or
+      ($entry.Contains("type") -and $entry["type"] -ne $Type -and $entry["type"] -ne "stdio") -or
+      ($entry.Contains("args") -and
+        ($entry["args"] -is [string] -or @($entry["args"]).Count -gt 0)) -or
+      $entry.Contains("url")) {
+    throw "Existing '$ServerName' registration conflicts with the managed stdio command: $ConfigPath. Preserve or reconcile its custom options before retrying."
+  }
+  if (Test-XTesterCommandPath $entry["command"] $CommandPath) {
+    return @{ State = "current"; Config = $config }
+  }
+  # Only known installer paths establish ownership. A same-named executable or
+  # wrapper elsewhere is not permission to replace a user's command.
+  $managedPaths = @((Join-Path $VenvPath "Scripts\xtester-mcp.exe"))
+  if ($env:LOCALAPPDATA) {
+    $managedPaths += Join-Path $env:LOCALAPPDATA "XTester\mcp\Scripts\xtester-mcp.exe"
+  }
+  foreach ($managed in $managedPaths) {
+    if (Test-XTesterCommandPath $entry["command"] $managed) {
+      return @{ State = "stale"; Config = $config }
+    }
+  }
+  throw "Existing '$ServerName' command is custom or no longer a known managed path: $ConfigPath. No configuration was changed."
+}
+
+function Set-XTesterClientRegistration(
+    $State, [string]$ConfigPath, [string]$Section, [string]$CommandPath, [string]$Type) {
+  if ($State.State -eq "current") {
+    Success "Existing '$ServerName' registration is current: $ConfigPath"
+    return
+  }
+  $config = $State.Config
+  if (-not $config.Contains($Section)) { $config[$Section] = [ordered]@{} }
+  if ($State.State -eq "stale") {
+    $config[$Section][$ServerName]["command"] = $CommandPath
+  } else {
+    $entry = [ordered]@{ command = $CommandPath; args = @() }
+    if ($Type) { $entry["type"] = $Type }
+    if ($Type -eq "local") { $entry["tools"] = @("*") }
+    $config[$Section][$ServerName] = $entry
+  }
+  Write-JsonObject $ConfigPath $config
+  Success "Wrote MCP registration: $ConfigPath"
 }
 
 function Register-VSCode([string]$CommandPath) {
   $configPath = Get-VSCodeUserMcpConfigPath
-  try {
-    $config = Read-JsonObject $configPath ([ordered]@{ servers = [ordered]@{} })
-    if (-not $config.Contains("servers")) { $config["servers"] = [ordered]@{} }
-    $config["servers"][$ServerName] = New-XTesterMcpServerEntry $CommandPath
-    Write-JsonObject $configPath $config
-    Success "Wrote VS Code user MCP config: $configPath"
-  }
-  catch {
-    # The existing mcp.json is corrupt/unreadable (the original reported failure
-    # mode was a truncated file). VS Code cannot load any server from a broken
-    # file, so just skipping leaves the user with no X-Tester registration.
-    # Recover by backing up the unreadable file and rewriting a minimal valid
-    # config so registration actually succeeds. A failure of even that recovery
-    # must not abort the whole installer (Python venv + other clients are done).
-    Warn "Existing VS Code MCP config could not be parsed: $($_.Exception.Message)"
-    try {
-      if (Test-Path -LiteralPath $configPath) {
-        $backupPath = "$configPath.bak"
-        Copy-Item -LiteralPath $configPath -Destination $backupPath -Force -ErrorAction Stop
-        Info "Backed up unreadable VS Code MCP config to: $backupPath"
-      }
-      $config = [ordered]@{ servers = [ordered]@{} }
-      $config["servers"][$ServerName] = New-XTesterMcpServerEntry $CommandPath
-      Write-JsonObject $configPath $config
-      Success "Rewrote VS Code user MCP config: $configPath"
-    }
-    catch {
-      throw "VS Code registration failed after config recovery: $($_.Exception.Message)"
-    }
-  }
+  $state = Get-XTesterClientState $configPath "servers" $CommandPath "stdio"
+  Set-XTesterClientRegistration $state $configPath "servers" $CommandPath "stdio"
 }
 
 function Expand-Clients {
@@ -1148,6 +1239,83 @@ function Register-XTesterClients([string]$VenvPython, [string]$CommandPath, [str
       "claude-code" { Register-ClaudeCode $CommandPath }
       "vscode" { Register-VSCode $CommandPath }
     }
+  }
+}
+
+function Offer-XTesterVSCode([string]$CommandPath) {
+  $configPath = Get-VSCodeUserMcpConfigPath
+  try {
+    $state = Get-XTesterClientState $configPath "servers" $CommandPath "stdio"
+    if ($state.State -eq "current") {
+      Success "VS Code registration is already current."
+      return $true
+    }
+    if ($state.State -eq "absent") {
+      $answer = Read-OptionalPrompt `
+        "VS Code detected. Also register X-Tester MCP with VS Code (user profile)? [Y/n]" `
+        "Non-interactive host; skipping first VS Code registration."
+      if ($null -eq $answer -or
+          (-not [string]::IsNullOrWhiteSpace($answer) -and $answer -notmatch '^(y|yes)$')) {
+        Info "Skipping VS Code registration. Re-run with -Client vscode to add it later."
+        return $false
+      }
+    }
+    Register-VSCode $CommandPath
+    return $true
+  }
+  catch {
+    Warn "Optional VS Code registration left unchanged: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Install-OptionalXTesterSkill([string]$VenvPython) {
+  # Older helpers ignore argv and install even for an unknown status flag.
+  # Check the capability by import before invoking the read-only CLI.
+  $capability = & $VenvPython -I -c "from xtester import skills_installer as m; print('supported' if callable(getattr(m, 'skill_status', None)) else 'unsupported')"
+  if ($LASTEXITCODE -ne 0 -or $capability -ne "supported") {
+    Warn "Installed skill helper lacks read-only status support or could not be loaded. Optional skills left unchanged; upgrade XTester or run xtester-install-skills explicitly after reviewing migration."
+    return
+  }
+  $raw = & $VenvPython -I -m xtester.skills_installer --status-json
+  if ($LASTEXITCODE -ne 0) {
+    Warn "Bundled skill status failed; existing content was not treated as absent and was left unchanged."
+    return
+  }
+  try {
+    $status = $raw | ConvertFrom-Json
+    if ($status.state -notin @("absent", "current", "outdated", "legacy") -or -not $status.root -or
+        $status.migration_required -isnot [bool]) {
+      throw "Invalid skill status response."
+    }
+  } catch {
+    Warn "Could not read bundled skill status: $($_.Exception.Message). Skills left unchanged."
+    return
+  }
+  if ($status.state -eq "current" -and -not $status.migration_required) {
+    Success "Bundled xtester skill is current; no reinstall needed."
+    return
+  }
+  $proceed = $status.state -eq "outdated" -and -not $status.migration_required
+  if (-not $proceed) {
+    $prompt = "Install the bundled xtester Copilot CLI skill into $($status.root)? [Y/n]"
+    if ($status.migration_required) {
+      Warn "Retired skill removal requires consent. The xtester folder is installed first."
+      foreach ($path in $status.retired) { Info $path }
+      $prompt = "Install the unified xtester skill and remove these retired skills? [Y/n]"
+    }
+    $answer = Read-OptionalPrompt $prompt "Non-interactive host; optional skill install or migration skipped."
+    $proceed = $null -ne $answer -and (
+      [string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$')
+  }
+  if ($proceed) {
+    Invoke-Step "Installing bundled xtester Copilot CLI skill into $($status.root)" {
+      $skillArguments = @("-I", "-m", "xtester.skills_installer")
+      if (-not $status.migration_required) { $skillArguments += "--no-migrate-legacy" }
+      Invoke-External $VenvPython $skillArguments
+    }
+  } elseif ($status.migration_required) {
+    Warn "Skill migration incomplete; retired skills were not removed. Re-run interactively and choose Yes to migrate."
   }
 }
 
@@ -1200,7 +1368,6 @@ Invoke-Step "Ensuring ffmpeg is available" {
   }
 }
 
-Stop-XTesterMcpProcesses
 $venvPython = New-ManagedVenv $pythonInfo
 Install-XTesterIntoVenv $venvPython
 Ensure-XTesterCliPath $venvPython
@@ -1220,71 +1387,19 @@ $registeredClients = @($selectedClients)
 if (-not $SkipClientInstall `
     -and ($selectedClients -contains 'copilot') `
     -and (-not ($selectedClients -contains 'vscode')) `
-    -and ($null -ne $Host.UI.RawUI) `
-    -and (-not [Console]::IsInputRedirected) `
     -and (Get-Command 'code' -ErrorAction SilentlyContinue)) {
-  Write-Host ""
-  $answer = Read-OptionalPrompt `
-    "VS Code detected. Also register X-Tester MCP with VS Code (user profile)? [Y/n]" `
-    "VS Code detected; skipping VS Code registration prompt in non-interactive host."
-  if ($null -eq $answer) {
-    Info "Skipping VS Code registration. Re-run with -Client vscode to add it later."
-  }
-  elseif ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$') {
-    Register-VSCode $xtesterMcp
+  if (Offer-XTesterVSCode $xtesterMcp) {
     $registeredClients += "vscode"
-  } else {
-    Info "Skipping VS Code registration. Re-run with -Client vscode to add it later."
   }
 }
 
 # ---------------------------------------------------------------------------
 # Bundled Copilot CLI skills -> ~/.copilot/skills/
 # Only runs when copilot is among the selected clients (other hosts use their
-# own skill mechanisms). The helper atomically replaces the unified slot.
+# own skill mechanisms).
 # ---------------------------------------------------------------------------
 if ($Client -contains "copilot" -or $Client -contains "all") {
-  $skillsRoot = & $venvPython -I -c "import os; from pathlib import Path; print(Path(os.environ.get('XTESTER_SKILLS_DEST') or Path.home() / '.copilot' / 'skills').expanduser().absolute())"
-  if ($LASTEXITCODE -ne 0) { throw "Could not resolve the Copilot skills destination." }
-  $retiredSkills = @(
-    foreach ($name in @("xtester-setup", "xtester-create", "xtester-run", "xtester-report")) {
-      $path = Join-Path $skillsRoot $name
-      if (Test-Path -LiteralPath $path -PathType Container) { $path }
-    }
-  )
-  $skillPrompt = "Install the bundled xtester Copilot CLI skill into ~/.copilot/skills/? [Y/n]"
-  if ($retiredSkills.Count -gt 0) {
-    Warn "These retired skills were replaced by the unified xtester skill:"
-    foreach ($path in $retiredSkills) { Info $path }
-    Warn "They no longer match the current MCP interface and may lead to incorrect calls. We strongly recommend Yes."
-    $skillPrompt = "Install the unified xtester skill and remove these retired skills? [Y/n]"
-  }
-  $proceed = $false
-  $cliSkillsBin = Join-Path $VenvPath "Scripts\xtester-install-skills.exe"
-  if (Test-Path -LiteralPath $cliSkillsBin) {
-    Write-Host ""
-    $answer = Read-OptionalPrompt $skillPrompt `
-      "Non-interactive host; skipping bundled xtester skill install (re-run interactively to install)."
-    if ($null -ne $answer) {
-      if ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$') {
-        $proceed = $true
-      }
-      else {
-        Info "Skipping CLI skill install."
-      }
-    }
-    if ($proceed) {
-      Invoke-Step "Installing bundled xtester Copilot CLI skill into $skillsRoot" {
-        Invoke-External $cliSkillsBin @()
-      }
-    }
-  }
-  else {
-    Warn "xtester-install-skills not found at $cliSkillsBin; skipping CLI skill install."
-  }
-  if ($retiredSkills.Count -gt 0 -and -not $proceed) {
-    Warn "Skill migration incomplete; retired skills were not removed. Re-run interactively and choose Yes to migrate."
-  }
+  Install-OptionalXTesterSkill $venvPython
 }
 
 $readinessArguments = @(
