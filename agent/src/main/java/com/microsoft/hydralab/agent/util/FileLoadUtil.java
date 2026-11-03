@@ -19,7 +19,6 @@ import org.springframework.util.Assert;
 
 import javax.annotation.Resource;
 import java.io.File;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -88,14 +87,11 @@ public class FileLoadUtil {
 
     public void installWinApp(StorageFileInfo attachment) {
         try {
-            Runtime runtime = Runtime.getRuntime();
             File attachmentFile = downloadFile(attachment, appOptions.getTestPackageLocation(), attachment.getBlobPath());
-            String installCommand = "& { Add-AppxPackage -ForceApplicationShutdown -forceupdatefromanyversion -Path '" +
-                    attachmentFile.getAbsolutePath() + "' }";
-            String[] command = new String[]{"Powershell.exe", "-Command", installCommand};
+            ProcessBuilder processBuilder = createWinAppInstallProcess(attachmentFile);
 
-            log.info("Install Win-App start command array: {}", Arrays.asList(command));
-            Process process = runtime.exec(command);
+            log.info("Install Win-App start command array: {}", processBuilder.command());
+            Process process = processBuilder.start();
             CommandOutputReceiver err = new CommandOutputReceiver(process.getErrorStream(), log);
             CommandOutputReceiver out = new CommandOutputReceiver(process.getInputStream(), log);
             err.start();
@@ -106,6 +102,15 @@ public class FileLoadUtil {
             log.error("Install Win-App failed", e);
         }
 
+    }
+
+    static ProcessBuilder createWinAppInstallProcess(File attachmentFile) {
+        // Keep stored filenames out of PowerShell source; environment values are passed as data.
+        String installCommand = "& { Add-AppxPackage -ForceApplicationShutdown -forceupdatefromanyversion "
+                + "-Path $env:HYDRALAB_WIN_APP_PATH }";
+        ProcessBuilder processBuilder = new ProcessBuilder("Powershell.exe", "-Command", installCommand);
+        processBuilder.environment().put("HYDRALAB_WIN_APP_PATH", attachmentFile.getAbsolutePath());
+        return processBuilder;
     }
 
     public void loadCommonFile(StorageFileInfo attachment, Task task) {
