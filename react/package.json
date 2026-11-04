@@ -41,7 +41,7 @@
     "@mui/lab": "^5.0.0-alpha.72",
     "@mui/material": "^5.4.4",
     "@react-sigma/core": "^3.3.0",
-    "axios": "^0.21.4",
+    "axios": "^0.34.0",
     "bootstrap": "^4.5.3",
     "copy-to-clipboard": "^3.3.2",
     "file-loader": "^6.2.0",
