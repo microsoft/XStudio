@@ -12,7 +12,7 @@ import java.util.zip.ZipInputStream;
 
 public class ZipBombChecker {
     private static final long MAX_UNCOMPRESSED_SIZE = 1024 * 1024 * 1024; // 1024 MB
-    private static final int MAX_ENTRIES = 15000;
+    private static final int MAX_ENTRIES = 20000;
     private static final int MAX_NESTING_DEPTH = 5;
 
     public static boolean isZipBomb(File file) {
